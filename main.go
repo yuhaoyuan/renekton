@@ -8,19 +8,28 @@ import "C"
 
 import (
 	"fmt"
+	"os"
 )
+
 func main() {
-	table := newTable()
+	args := os.Args
+	if len(args) < 2 {
+		fmt.Println("Must supply a database filename")
+		os.Exit(0)
+	}
+	filename := args[1]
+	table := dbOpen(filename)
 	inputBuffer := newInputBuffer()
 
 	for {
 		printPrompt()
 		err := readInput(inputBuffer)
 		if err != nil {
-
+			fmt.Println("readInput failed, err = ", err)
+			os.Exit(0)
 		}
 		if inputBuffer.buffer[0] == '.' {
-			switch doMetaCommand(inputBuffer) {
+			switch doMetaCommand(inputBuffer, table) {
 			case META_COMMAND_EXIT:
 				fmt.Println("exit command!")
 				return // 直接退出main
