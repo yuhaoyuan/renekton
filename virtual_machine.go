@@ -14,32 +14,57 @@ import (
 	"strconv"
 )
 
+type Page struct {
+	pageLength int // 维护当前切片最大长度
+	data       *[]byte
+}
+
 type Pager struct {
 	fileDescriptor *os.File
 	fileLength     int
-	Pages          [TABLE_MAX_PAGES]*[]byte
+	Pages          [TABLE_MAX_PAGES]*Page
 }
 
-func getPage(pager *Pager, pageIndex int) error {
+func getPage(pager *Pager, pageIndex int) (*Page, error) {
 	if pageIndex > TABLE_MAX_PAGES {
 		fmt.Println("getPage pageNum too large")
-		return errors.New("getPage pageNum too large")
+		return nil, errors.New("getPage pageNum too large")
 	}
 	if pager.Pages[pageIndex] == nil {
+
 		// miss cache
 		tempPage := make([]byte, PAGE_SIZE)
-		numPages := pager.fileLength / PAGE_SIZE
-
+		pagesCount := pager.fileLength / PAGE_SIZE
 		if (pager.fileLength % PAGE_SIZE) > 0 {
-			numPages++
+			pagesCount++
 		}
-
-		if pageIndex <= numPages {
-
+		// 访问的page位于文件边缘
+		if pageIndex <= pagesCount {
+			_, err := pager.fileDescriptor.Seek(int64(pageIndex*PAGE_SIZE), io.SeekStart)
+			if err != nil {
+				fmt.Println("fileDescriptor seek failed, err = ", err)
+				os.Exit(0)
+			}
+			_, err = pager.fileDescriptor.ReadAt(tempPage, int64(pageIndex*PAGE_SIZE)) // 最多读tempPage的长度
+			if err != nil {
+				if err == io.EOF {
+					pager.Pages[pageIndex] = &Page{
+						len(tempPage),
+						&tempPage,
+					}
+					return pager.Pages[pageIndex], nil
+				}
+				fmt.Println("fileDescriptor read failed, err = ", err)
+				os.Exit(0)
+			}
+			pager.Pages[pageIndex] = &Page{
+				len(tempPage),
+				&tempPage,
+			}
 		}
-		pager.Pages[pageIndex] = &tempPage
+		// 因为golang uint8=0 也会读，所以读完了之后，手动处理一下理论长度
 	}
-	return nil
+	return pager.Pages[pageIndex], nil
 }
 
 type Table struct {
@@ -87,16 +112,18 @@ func executeInsert(statement *Statement, table *Table) ExecuteResult {
 }
 
 func executeSelect(statement *Statement, table *Table) ExecuteResult {
-	row := Row{}
+	row := &Row{}
 	for i := 0; i < int(table.NumRows); i++ {
 		pagePtr, offset := rowSlot(table, i)
-		deserializeRow(pagePtr, offset, &row)
-		fmt.Println("\n*********************************************")
-		fmt.Println(" th row = ", row)
-		fmt.Println("id = ", row.Id)
-		fmt.Println("UserName = ", string(row.UserName))
-		fmt.Println("UserName = ", string(row.Email))
-		fmt.Println("*********************************************\n")
+		row = deserializeRow(pagePtr.data, offset)
+		if row != nil {
+			fmt.Println("\n*********************************************")
+			fmt.Println(" th row = ", row)
+			fmt.Println("id = ", row.Id)
+			fmt.Println("UserName = ", string(row.UserName))
+			fmt.Println("UserName = ", string(row.Email))
+			fmt.Println("*********************************************\n")
+		}
 	}
 	return EXECUTE_SUCCESS
 }
@@ -111,21 +138,25 @@ const (
 	ROW_SIZE        = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE
 )
 
-func serializeRow(source *Row, page *[]byte, offset int) {
+func serializeRow(source *Row, page *Page, offset int) {
 	//
 	IdStr := strconv.Itoa(int(source.Id))
 	IdLength := len(IdStr)
 	IdLengthStr := strconv.Itoa(IdLength)
 
-	copy((*page)[offset+ID_OFFSET:], IdLengthStr)
-	copy((*page)[offset+ID_OFFSET+1:], IdStr)
+	copy((*page.data)[offset+ID_OFFSET:], IdLengthStr)
+	copy((*page.data)[offset+ID_OFFSET+1:], IdStr)
 
-	copy((*page)[offset+USERNAME_OFFSET:], source.UserName)
-	copy((*page)[offset+EMAIL_OFFSET:], source.Email)
+	copy((*page.data)[offset+USERNAME_OFFSET:], source.UserName)
+	copy((*page.data)[offset+EMAIL_OFFSET:], source.Email)
+	page.pageLength = offset + ROW_SIZE
 }
 
-func deserializeRow(source *[]byte, offset int, destination *Row) {
+func deserializeRow(source *[]byte, offset int) *Row {
 	idLengthStr := (*source)[offset+ID_OFFSET : offset+ID_OFFSET+1]
+	if idLengthStr[0] == 0 { // 此处内存为0值
+		return nil
+	}
 	idLength, err := strconv.ParseInt(string(idLengthStr), 10, 64)
 	if err != nil {
 		fmt.Println("deserializeRow parse failed, err = ", err)
@@ -137,10 +168,12 @@ func deserializeRow(source *[]byte, offset int, destination *Row) {
 		fmt.Println("deserializeRow parse failed, err = ", err)
 		os.Exit(0)
 	}
+	destination := &Row{}
 	destination.Id = int32(idInt)
 
 	destination.UserName = (*source)[offset+USERNAME_OFFSET : offset+USERNAME_OFFSET+USERNAME_SIZE]
 	destination.Email = (*source)[offset+EMAIL_OFFSET : offset+EMAIL_OFFSET+EMAIL_SIZE]
+	return destination
 }
 
 const (
@@ -150,22 +183,22 @@ const (
 	TABLE_MAX_ROWS  = ROWS_PER_PAGE * TABLE_MAX_PAGES
 )
 
-func rowSlot(table *Table, rowTh int) (*[]byte, int) {
+func rowSlot(table *Table, rowTh int) (*Page, int) {
 	pageTh := rowTh / ROWS_PER_PAGE // 定位page
 	var err error
-	err = getPage(table.Pager, pageTh)
+	page, err := getPage(table.Pager, pageTh)
 	if err != nil {
 		fmt.Println("rowSlot getPage failed, err = ", err)
 	}
 	rowOffset := rowTh % ROWS_PER_PAGE    // 定位在此页中的行数
 	rowByteOffset := rowOffset * ROW_SIZE // 计算此行开始的位置
-	return table.Pager.Pages[pageTh], rowByteOffset
+	return page, rowByteOffset
 }
 
 func pagerOpen(fileName string) *Pager {
 	exPath, _ := os.Getwd()
 	filePath := exPath + "/" + fileName
-	file, err := os.Open(filePath)
+	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0666) //0666表示：创建了一个普通文件，所有人拥有对该文件的读、写权限，但是都不可执行
 	if err != nil {
 		fmt.Println("Unable to open file")
 		os.Exit(0)
@@ -201,16 +234,25 @@ func pagerFlush(pager *Pager, pageTh int) {
 
 	_, err := pager.fileDescriptor.Seek(int64(pageTh*PAGE_SIZE), io.SeekCurrent)
 	if err != nil {
-
+		fmt.Println("pager fileDescriptor Seek failed, err = ", err)
+		os.Exit(0)
 	}
-	_, err = pager.fileDescriptor.Write(*pager.Pages[pageTh])
-	if err != nil {
 
+	// 截断
+	data := (*pager.Pages[pageTh].data)[:pager.Pages[pageTh].pageLength]
+	_, err = pager.fileDescriptor.Write(data)
+	if err != nil {
+		fmt.Println("pager fileDescriptor Write failed, err = ", err)
+		os.Exit(0)
 	}
 }
 
 func dbClose(table *Table) {
-	for i := 0; i < int(table.NumRows)/ROWS_PER_PAGE; i++ {
+	pager := table.Pager
+	for i := 0; i <= int(table.NumRows)/ROWS_PER_PAGE; i++ {
+		if pager.Pages[i] == nil {
+			continue
+		}
 		pagerFlush(table.Pager, i)
 	}
 	_ = table.Pager.fileDescriptor.Close()
