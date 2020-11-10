@@ -14,17 +14,6 @@ import (
 	"strconv"
 )
 
-type Page struct {
-	pageLength int // 维护当前切片最大长度
-	data       *[]byte
-}
-
-type Pager struct {
-	fileDescriptor *os.File
-	fileLength     int
-	Pages          [TABLE_MAX_PAGES]*Page
-}
-
 func getPage(pager *Pager, pageIndex int) (*Page, error) {
 	if pageIndex > TABLE_MAX_PAGES {
 		fmt.Println("getPage pageNum too large")
@@ -67,11 +56,6 @@ func getPage(pager *Pager, pageIndex int) (*Page, error) {
 	return pager.Pages[pageIndex], nil
 }
 
-type Table struct {
-	NumRows int32
-	Pager   *Pager
-}
-
 func doMetaCommand(inputBuffer *InputBuffer, table *Table) MetaCommandResult {
 	if inputBuffer.buffer == ".exit" {
 		dbClose(table)
@@ -100,12 +84,13 @@ func executeStatement(statement *Statement, table *Table) ExecuteResult {
 }
 
 func executeInsert(statement *Statement, table *Table) ExecuteResult {
-	if table.NumRows >= int32(TABLE_MAX_ROWS) {
+	if table.NumRows >= TABLE_MAX_ROWS {
 		return EXECUTE_TABLE_FULL
 	}
 
 	rowToInsert := &statement.RowToInsert
-	pagePtr, offset := rowSlot(table, int(table.NumRows))
+	curSor := tableEnd(table)
+	pagePtr, offset := cursorValue(curSor)
 	serializeRow(rowToInsert, pagePtr, offset)
 	table.NumRows += 1
 	return EXECUTE_SUCCESS
@@ -113,8 +98,12 @@ func executeInsert(statement *Statement, table *Table) ExecuteResult {
 
 func executeSelect(statement *Statement, table *Table) ExecuteResult {
 	row := &Row{}
-	for i := 0; i < int(table.NumRows); i++ {
-		pagePtr, offset := rowSlot(table, i)
+	curSor := tableStart(table)
+	for {
+		if curSor.EndOfTable == true {
+			break
+		}
+		pagePtr, offset := cursorValue(curSor)
 		row = deserializeRow(pagePtr.data, offset)
 		if row != nil {
 			fmt.Println("\n*********************************************")
@@ -124,6 +113,7 @@ func executeSelect(statement *Statement, table *Table) ExecuteResult {
 			fmt.Println("UserName = ", string(row.Email))
 			fmt.Println("*********************************************\n")
 		}
+		curSor.advance()
 	}
 	return EXECUTE_SUCCESS
 }
@@ -183,15 +173,18 @@ const (
 	TABLE_MAX_ROWS  = ROWS_PER_PAGE * TABLE_MAX_PAGES
 )
 
-func rowSlot(table *Table, rowTh int) (*Page, int) {
-	pageTh := rowTh / ROWS_PER_PAGE // 定位page
-	var err error
-	page, err := getPage(table.Pager, pageTh)
+func cursorValue(curSor *Cursor) (*Page, int) {
+	pageTh := curSor.RowTh / ROWS_PER_PAGE
+
+	page, err := getPage(curSor.Table.Pager, pageTh)
 	if err != nil {
-		fmt.Println("rowSlot getPage failed, err = ", err)
+		fmt.Println("cursorValue.getPage failed , err = ", err)
+		os.Exit(1)
 	}
-	rowOffset := rowTh % ROWS_PER_PAGE    // 定位在此页中的行数
-	rowByteOffset := rowOffset * ROW_SIZE // 计算此行开始的位置
+
+	rowOffset := curSor.RowTh % ROWS_PER_PAGE // 定位在此页中的行数
+	rowByteOffset := rowOffset * ROW_SIZE     // 计算此行开始的位置
+
 	return page, rowByteOffset
 }
 
@@ -221,7 +214,7 @@ func dbOpen(fileName string) *Table {
 	pager := pagerOpen(fileName)
 	numRows := pager.fileLength / ROW_SIZE
 	return &Table{
-		NumRows: int32(numRows),
+		NumRows: numRows,
 		Pager:   pager,
 	}
 }
@@ -256,4 +249,22 @@ func dbClose(table *Table) {
 		pagerFlush(table.Pager, i)
 	}
 	_ = table.Pager.fileDescriptor.Close()
+}
+
+// 创建一个位于table开始位置的光标
+func tableStart(table *Table) *Cursor {
+	return &Cursor{
+		Table:      table,
+		RowTh:      0,
+		EndOfTable: table.NumRows == 0,
+	}
+}
+
+// 将创建一个table末尾的光标
+func tableEnd(table *Table) *Cursor {
+	return &Cursor{
+		Table:      table,
+		RowTh:      table.NumRows,
+		EndOfTable: true,
+	}
 }
