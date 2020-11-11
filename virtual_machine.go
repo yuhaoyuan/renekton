@@ -14,6 +14,11 @@ import (
 	"strconv"
 )
 
+func PrintError(errMsg string) {
+	fmt.Println(errMsg)
+	os.Exit(0)
+}
+
 func getPage(pager *Pager, pageIndex int) (*Page, error) {
 	if pageIndex > TABLE_MAX_PAGES {
 		fmt.Println("getPage pageNum too large")
@@ -47,11 +52,14 @@ func getPage(pager *Pager, pageIndex int) (*Page, error) {
 				os.Exit(0)
 			}
 			pager.Pages[pageIndex] = &Page{
+				// 因为golang uint8=0 也会读，所以读完了之后，手动处理一下理论长度
 				len(tempPage),
 				&tempPage,
 			}
+			if pageIndex >= pager.pagesCount {
+				pager.pagesCount = pageIndex + 1
+			}
 		}
-		// 因为golang uint8=0 也会读，所以读完了之后，手动处理一下理论长度
 	}
 	return pager.Pages[pageIndex], nil
 }
@@ -60,9 +68,10 @@ func doMetaCommand(inputBuffer *InputBuffer, table *Table) MetaCommandResult {
 	if inputBuffer.buffer == ".exit" {
 		dbClose(table)
 		return META_COMMAND_EXIT
-	} else {
-		return META_COMMAND_UNRECOGNIZED_COMMAND
+	} else if inputBuffer.buffer == ".constants" {
+		printConstants()
 	}
+	return META_COMMAND_UNRECOGNIZED_COMMAND
 }
 
 type ExecuteResult int
@@ -84,15 +93,17 @@ func executeStatement(statement *Statement, table *Table) ExecuteResult {
 }
 
 func executeInsert(statement *Statement, table *Table) ExecuteResult {
-	if table.NumRows >= TABLE_MAX_ROWS {
+	page, err := getPage(table.Pager, table.rootPageCTh)
+	if err != nil || leafNodeGetCellsCount(page) > LEAF_NODE_MAX_CELLS {
+		fmt.Println("executeInsert failed, err = ", err)
 		return EXECUTE_TABLE_FULL
 	}
 
 	rowToInsert := &statement.RowToInsert
 	curSor := tableEnd(table)
-	pagePtr, offset := cursorValue(curSor)
-	serializeRow(rowToInsert, pagePtr, offset)
-	table.NumRows += 1
+
+	idStr := strconv.FormatInt(int64(rowToInsert.Id), 10)
+	leafNodeInsert(curSor, []byte(idStr), rowToInsert)
 	return EXECUTE_SUCCESS
 }
 
@@ -103,8 +114,8 @@ func executeSelect(statement *Statement, table *Table) ExecuteResult {
 		if curSor.EndOfTable == true {
 			break
 		}
-		pagePtr, offset := cursorValue(curSor)
-		row = deserializeRow(pagePtr.data, offset)
+		data := cursorValue(curSor)
+		row = deserializeRow(data, 0)
 		if row != nil {
 			fmt.Println("\n*********************************************")
 			fmt.Println(" th row = ", row)
@@ -142,8 +153,9 @@ func serializeRow(source *Row, page *Page, offset int) {
 	page.pageLength = offset + ROW_SIZE
 }
 
-func deserializeRow(source *[]byte, offset int) *Row {
-	idLengthStr := (*source)[offset+ID_OFFSET : offset+ID_OFFSET+1]
+// 反序列化，将字符串变成数据
+func deserializeRow(source []byte, offset int) *Row {
+	idLengthStr := source[offset+ID_OFFSET : offset+ID_OFFSET+1]
 	if idLengthStr[0] == 0 { // 此处内存为0值
 		return nil
 	}
@@ -152,7 +164,7 @@ func deserializeRow(source *[]byte, offset int) *Row {
 		fmt.Println("deserializeRow parse failed, err = ", err)
 		os.Exit(0)
 	}
-	idStr := (*source)[offset+ID_OFFSET+1 : offset+ID_OFFSET+1+int(idLength)]
+	idStr := source[offset+ID_OFFSET+1 : offset+ID_OFFSET+1+int(idLength)]
 	idInt, err := strconv.ParseInt(string(idStr), 10, 64)
 	if err != nil {
 		fmt.Println("deserializeRow parse failed, err = ", err)
@@ -161,8 +173,8 @@ func deserializeRow(source *[]byte, offset int) *Row {
 	destination := &Row{}
 	destination.Id = int32(idInt)
 
-	destination.UserName = (*source)[offset+USERNAME_OFFSET : offset+USERNAME_OFFSET+USERNAME_SIZE]
-	destination.Email = (*source)[offset+EMAIL_OFFSET : offset+EMAIL_OFFSET+EMAIL_SIZE]
+	destination.UserName = source[offset+USERNAME_OFFSET : offset+USERNAME_OFFSET+USERNAME_SIZE]
+	destination.Email = source[offset+EMAIL_OFFSET : offset+EMAIL_OFFSET+EMAIL_SIZE]
 	return destination
 }
 
@@ -173,19 +185,15 @@ const (
 	TABLE_MAX_ROWS  = ROWS_PER_PAGE * TABLE_MAX_PAGES
 )
 
-func cursorValue(curSor *Cursor) (*Page, int) {
-	pageTh := curSor.RowTh / ROWS_PER_PAGE
-
-	page, err := getPage(curSor.Table.Pager, pageTh)
+func cursorValue(curSor *Cursor) []byte {
+	page, err := getPage(curSor.Table.Pager, curSor.PageTh)
 	if err != nil {
 		fmt.Println("cursorValue.getPage failed , err = ", err)
 		os.Exit(1)
 	}
+	value := leafNodeGetValue(page, curSor.CellTh)
 
-	rowOffset := curSor.RowTh % ROWS_PER_PAGE // 定位在此页中的行数
-	rowByteOffset := rowOffset * ROW_SIZE     // 计算此行开始的位置
-
-	return page, rowByteOffset
+	return value
 }
 
 func pagerOpen(fileName string) *Pager {
@@ -212,10 +220,17 @@ func pagerOpen(fileName string) *Pager {
 
 func dbOpen(fileName string) *Table {
 	pager := pagerOpen(fileName)
-	numRows := pager.fileLength / ROW_SIZE
+	if pager.pagesCount == 0 {
+		rooPage, err := getPage(pager, 0)
+		if err != nil {
+			PrintError(fmt.Sprintf("dbOpen failed, err = %s", err.Error()))
+		}
+		initializeLeafNode(rooPage)
+	}
+
 	return &Table{
-		NumRows: numRows,
-		Pager:   pager,
+		rootPageCTh: 0,
+		Pager:       pager,
 	}
 }
 
@@ -242,7 +257,7 @@ func pagerFlush(pager *Pager, pageTh int) {
 
 func dbClose(table *Table) {
 	pager := table.Pager
-	for i := 0; i <= int(table.NumRows)/ROWS_PER_PAGE; i++ {
+	for i := 0; i <= pager.pagesCount; i++ {
 		if pager.Pages[i] == nil {
 			continue
 		}
@@ -253,18 +268,34 @@ func dbClose(table *Table) {
 
 // 创建一个位于table开始位置的光标
 func tableStart(table *Table) *Cursor {
-	return &Cursor{
-		Table:      table,
-		RowTh:      0,
-		EndOfTable: table.NumRows == 0,
+	cursor := &Cursor{
+		Table:  table,
+		PageTh: table.rootPageCTh,
+		CellTh: 0,
 	}
+
+	rootPage, err := getPage(table.Pager, table.rootPageCTh)
+	if err != nil {
+		fmt.Println("tableStart.getPage failed, err = ", err)
+		os.Exit(1)
+	}
+	cursor.EndOfTable = leafNodeGetCellsCount(rootPage) == 0
+	return cursor
 }
 
 // 将创建一个table末尾的光标
 func tableEnd(table *Table) *Cursor {
-	return &Cursor{
-		Table:      table,
-		RowTh:      table.NumRows,
-		EndOfTable: true,
+	cursor := &Cursor{
+		Table:  table,
+		PageTh: table.rootPageCTh,
 	}
+
+	rootPage, err := getPage(table.Pager, table.rootPageCTh)
+	if err != nil {
+		fmt.Println("tableEnd.getPage failed, err = ", err)
+		os.Exit(1)
+	}
+
+	cursor.CellTh = leafNodeGetCellsCount(rootPage)
+	return cursor
 }
