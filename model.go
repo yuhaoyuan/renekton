@@ -30,7 +30,7 @@ func (c *Cursor) advance() {
 	page, _ := getPage(c.Table.Pager, c.PageTh)
 
 	c.CellTh += 1
-	if c.CellTh == leafNodeGetCellsCount(page) {
+	if c.CellTh == int(leafNodeGetCellsCount(page)) {
 		c.EndOfTable = true
 	}
 }

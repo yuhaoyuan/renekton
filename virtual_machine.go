@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 )
 
 func PrintError(errMsg string) {
@@ -80,6 +79,7 @@ const (
 	EXECUTE_SUCCESS ExecuteResult = iota
 	EXECUTE_TABLE_FULL
 	EXECUTE_FAILED
+	EXECUTE_DUPLICATE_KEY
 )
 
 func executeStatement(statement *Statement, table *Table) ExecuteResult {
@@ -94,16 +94,24 @@ func executeStatement(statement *Statement, table *Table) ExecuteResult {
 
 func executeInsert(statement *Statement, table *Table) ExecuteResult {
 	page, err := getPage(table.Pager, table.rootPageCTh)
-	if err != nil || leafNodeGetCellsCount(page) > LEAF_NODE_MAX_CELLS {
+	cellsCount := int(leafNodeGetCellsCount(page))
+	if err != nil || cellsCount > LEAF_NODE_MAX_CELLS {
 		fmt.Println("executeInsert failed, err = ", err)
 		return EXECUTE_TABLE_FULL
 	}
 
 	rowToInsert := &statement.RowToInsert
-	curSor := tableEnd(table)
+	curSor := tableFind(table, rowToInsert.Id)
+	if curSor.CellTh < cellsCount {
+		keyAtTh := leafNodeGetKey(page, curSor.PageTh)
+		if keyAtTh == rowToInsert.Id {
+			// 主键冲突
+			return EXECUTE_DUPLICATE_KEY
+		}
+	}
 
-	idStr := strconv.FormatInt(int64(rowToInsert.Id), 10)
-	leafNodeInsert(curSor, []byte(idStr), rowToInsert)
+	idStr := NumberToByte(rowToInsert.Id)
+	leafNodeInsert(curSor, idStr[:], rowToInsert)
 	return EXECUTE_SUCCESS
 }
 
@@ -129,24 +137,9 @@ func executeSelect(statement *Statement, table *Table) ExecuteResult {
 	return EXECUTE_SUCCESS
 }
 
-const (
-	ID_SIZE         = 10
-	USERNAME_SIZE   = 32
-	EMAIL_SIZE      = 255
-	ID_OFFSET       = 0
-	USERNAME_OFFSET = ID_OFFSET + ID_SIZE
-	EMAIL_OFFSET    = USERNAME_OFFSET + USERNAME_SIZE
-	ROW_SIZE        = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE
-)
-
 func serializeRow(source *Row, page *Page, offset int) {
-	//
-	IdStr := strconv.Itoa(int(source.Id))
-	IdLength := len(IdStr)
-	IdLengthStr := strconv.Itoa(IdLength)
-
-	copy((*page.data)[offset+ID_OFFSET:], IdLengthStr)
-	copy((*page.data)[offset+ID_OFFSET+1:], IdStr)
+	idStr := NumberToByte(source.Id)
+	copy((*page.data)[offset+ID_OFFSET:], idStr[:])
 
 	copy((*page.data)[offset+USERNAME_OFFSET:], source.UserName)
 	copy((*page.data)[offset+EMAIL_OFFSET:], source.Email)
@@ -155,24 +148,11 @@ func serializeRow(source *Row, page *Page, offset int) {
 
 // 反序列化，将字符串变成数据
 func deserializeRow(source []byte, offset int) *Row {
-	idLengthStr := source[offset+ID_OFFSET : offset+ID_OFFSET+1]
-	if idLengthStr[0] == 0 { // 此处内存为0值
-		return nil
-	}
-	idLength, err := strconv.ParseInt(string(idLengthStr), 10, 64)
-	if err != nil {
-		fmt.Println("deserializeRow parse failed, err = ", err)
-		os.Exit(0)
-	}
-	idStr := source[offset+ID_OFFSET+1 : offset+ID_OFFSET+1+int(idLength)]
-	idInt, err := strconv.ParseInt(string(idStr), 10, 64)
-	if err != nil {
-		fmt.Println("deserializeRow parse failed, err = ", err)
-		os.Exit(0)
-	}
-	destination := &Row{}
-	destination.Id = int32(idInt)
+	idStr := source[offset+ID_OFFSET : offset+ID_OFFSET+ID_SIZE]
+	idInt := ByteToNumber(idStr[0:4])
 
+	destination := &Row{}
+	destination.Id = idInt
 	destination.UserName = source[offset+USERNAME_OFFSET : offset+USERNAME_OFFSET+USERNAME_SIZE]
 	destination.Email = source[offset+EMAIL_OFFSET : offset+EMAIL_OFFSET+EMAIL_SIZE]
 	return destination
@@ -283,19 +263,48 @@ func tableStart(table *Table) *Cursor {
 	return cursor
 }
 
-// 将创建一个table末尾的光标
-func tableEnd(table *Table) *Cursor {
-	cursor := &Cursor{
-		Table:  table,
-		PageTh: table.rootPageCTh,
-	}
-
+// 创建一个指向特定位置的光标
+func tableFind(table *Table, key uint32) *Cursor {
 	rootPage, err := getPage(table.Pager, table.rootPageCTh)
 	if err != nil {
-		fmt.Println("tableEnd.getPage failed, err = ", err)
-		os.Exit(1)
+		os.Exit(0)
 	}
+	nodeType := getNodeType(rootPage)
+	if nodeType == NODE_LEAF { // 如果是叶子节点对应的page，那么找一个特定的cell
+		return leafNodeFind(table, table.rootPageCTh, key)
+	}
+	PrintError("Need to implement searching an internal node")
+	return nil
+}
 
-	cursor.CellTh = leafNodeGetCellsCount(rootPage)
+func leafNodeFind(table *Table, pageTh int, key uint32) *Cursor {
+	node, err := getPage(table.Pager, pageTh)
+	if err != nil {
+		os.Exit(0)
+	}
+	cellCount := int(leafNodeGetCellsCount(node))
+
+	cursor := &Cursor{}
+	cursor.Table = table
+	cursor.PageTh = pageTh
+
+	// 二分
+	lIndex := 0
+	rIndex := cellCount
+	for lIndex < rIndex {
+		mid := (lIndex + rIndex) / 2
+		keyAtMid := leafNodeGetKey(node, mid)
+		if keyAtMid == key {
+			cursor.PageTh = mid
+			return cursor
+		}
+
+		if keyAtMid > key {
+			rIndex = mid
+		} else {
+			lIndex = mid + 1
+		}
+	}
+	cursor.CellTh = lIndex
 	return cursor
 }

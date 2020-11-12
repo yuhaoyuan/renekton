@@ -36,15 +36,13 @@ const (
 	STATEMENT_SELECT
 )
 
-
-type Row struct{
-	Id int32
+type Row struct {
+	Id       uint32
 	UserName []byte
-	Email []byte
+	Email    []byte
 }
 
-
-func printRow(row *Row){
+func printRow(row *Row) {
 	fmt.Println(row.Id)
 	fmt.Println(row.UserName)
 	fmt.Println(row.Email)
@@ -94,7 +92,7 @@ func prepareStatement(inputBuffer *InputBuffer, statement *Statement) PrepareRes
 			return PREPARE_STRING_TOO_LONG
 		}
 
-		statement.RowToInsert.Id =  int32(idInt32)
+		statement.RowToInsert.Id = uint32(idInt32)
 		statement.RowToInsert.UserName = []byte(args[2])
 		statement.RowToInsert.Email = []byte(args[3])
 		return PREPARE_SUCCESS
