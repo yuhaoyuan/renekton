@@ -18,7 +18,8 @@ func PrintError(errMsg string) {
 	os.Exit(0)
 }
 
-func getPage(pager *Pager, pageIndex int) (*Page, error) {
+// 获取已有的节点/申请新的节点
+func getPage(pager *Pager, pageIndex uint32) (*Page, error) {
 	if pageIndex > TABLE_MAX_PAGES {
 		fmt.Println("getPage pageNum too large")
 		return nil, errors.New("getPage pageNum too large")
@@ -39,25 +40,18 @@ func getPage(pager *Pager, pageIndex int) (*Page, error) {
 				os.Exit(0)
 			}
 			_, err = pager.fileDescriptor.ReadAt(tempPage, int64(pageIndex*PAGE_SIZE)) // 最多读tempPage的长度
-			if err != nil {
-				if err == io.EOF {
-					pager.Pages[pageIndex] = &Page{
-						len(tempPage),
-						&tempPage,
-					}
-					return pager.Pages[pageIndex], nil
-				}
+			if err != nil && err != io.EOF {
 				fmt.Println("fileDescriptor read failed, err = ", err)
 				os.Exit(0)
 			}
-			pager.Pages[pageIndex] = &Page{
-				// 因为golang uint8=0 也会读，所以读完了之后，手动处理一下理论长度
-				len(tempPage),
-				&tempPage,
-			}
-			if pageIndex >= pager.pagesCount {
-				pager.pagesCount = pageIndex + 1
-			}
+		}
+		pager.Pages[pageIndex] = &Page{
+			// 因为golang uint8=0 也会读，所以读完了之后，手动处理一下理论长度
+			uint32(len(tempPage)),
+			&tempPage,
+		}
+		if pageIndex >= pager.pagesCount {
+			pager.pagesCount = pageIndex + 1
 		}
 	}
 	return pager.Pages[pageIndex], nil
@@ -94,16 +88,15 @@ func executeStatement(statement *Statement, table *Table) ExecuteResult {
 
 func executeInsert(statement *Statement, table *Table) ExecuteResult {
 	page, err := getPage(table.Pager, table.rootPageCTh)
-	cellsCount := int(leafNodeGetCellsCount(page))
-	if err != nil || cellsCount > LEAF_NODE_MAX_CELLS {
-		fmt.Println("executeInsert failed, err = ", err)
-		return EXECUTE_TABLE_FULL
+	if err != nil {
+		os.Exit(0)
 	}
+	cellsCount := page.LeafNodeGetCellsCount()
 
 	rowToInsert := &statement.RowToInsert
 	curSor := tableFind(table, rowToInsert.Id)
 	if curSor.CellTh < cellsCount {
-		keyAtTh := leafNodeGetKey(page, curSor.PageTh)
+		keyAtTh := page.LeafNodeGetKey(uint32(curSor.PageTh))
 		if keyAtTh == rowToInsert.Id {
 			// 主键冲突
 			return EXECUTE_DUPLICATE_KEY
@@ -129,7 +122,7 @@ func executeSelect(statement *Statement, table *Table) ExecuteResult {
 			fmt.Println(" th row = ", row)
 			fmt.Println("id = ", row.Id)
 			fmt.Println("UserName = ", string(row.UserName))
-			fmt.Println("UserName = ", string(row.Email))
+			fmt.Println("Email = ", string(row.Email))
 			fmt.Println("*********************************************\n")
 		}
 		curSor.advance()
@@ -137,17 +130,33 @@ func executeSelect(statement *Statement, table *Table) ExecuteResult {
 	return EXECUTE_SUCCESS
 }
 
-func serializeRow(source *Row, page *Page, offset int) {
+func serializeRow(source *Row, page *Page, cellTh uint32) {
+	offset := LEAF_NODE_HEADER_SIZE + cellTh*LEAF_NODE_CELL_SIZE + LEAF_NODE_KEY_SIZE
+
 	idStr := NumberToByte(source.Id)
 	copy((*page.data)[offset+ID_OFFSET:], idStr[:])
 
-	copy((*page.data)[offset+USERNAME_OFFSET:], source.UserName)
-	copy((*page.data)[offset+EMAIL_OFFSET:], source.Email)
+	userNameByte := source.UserName
+	userNameLen := len(userNameByte)
+	if uint32(userNameLen) < USERNAME_SIZE {
+		for i := uint32(0); i < USERNAME_SIZE-uint32(userNameLen); i++ {
+			userNameByte = append(userNameByte, uint8(0))
+		}
+	}
+	emailByte := source.Email
+	if uint32(len(emailByte)) < EMAIL_SIZE {
+		for i := uint32(0); i < EMAIL_SIZE-uint32(userNameLen); i++ {
+			emailByte = append(emailByte, uint8(0))
+		}
+	}
+
+	copy((*page.data)[offset+USERNAME_OFFSET:], userNameByte)
+	copy((*page.data)[offset+EMAIL_OFFSET:], emailByte)
 	page.pageLength = offset + ROW_SIZE
 }
 
 // 反序列化，将字符串变成数据
-func deserializeRow(source []byte, offset int) *Row {
+func deserializeRow(source []byte, offset uint32) *Row {
 	idStr := source[offset+ID_OFFSET : offset+ID_OFFSET+ID_SIZE]
 	idInt := ByteToNumber(idStr[0:4])
 
@@ -159,8 +168,8 @@ func deserializeRow(source []byte, offset int) *Row {
 }
 
 const (
-	PAGE_SIZE       = int(4096)
-	TABLE_MAX_PAGES = 100
+	PAGE_SIZE       = uint32(4096)
+	TABLE_MAX_PAGES = uint32(100)
 	ROWS_PER_PAGE   = PAGE_SIZE / ROW_SIZE
 	TABLE_MAX_ROWS  = ROWS_PER_PAGE * TABLE_MAX_PAGES
 )
@@ -171,7 +180,7 @@ func cursorValue(curSor *Cursor) []byte {
 		fmt.Println("cursorValue.getPage failed , err = ", err)
 		os.Exit(1)
 	}
-	value := leafNodeGetValue(page, curSor.CellTh)
+	value := page.LeafNodeGetValue(curSor.CellTh)
 
 	return value
 }
@@ -192,7 +201,7 @@ func pagerOpen(fileName string) *Pager {
 
 	pager := &Pager{
 		fileDescriptor: file,
-		fileLength:     int(fileLength),
+		fileLength:     uint32(fileLength),
 	}
 
 	return pager
@@ -206,6 +215,7 @@ func dbOpen(fileName string) *Table {
 			PrintError(fmt.Sprintf("dbOpen failed, err = %s", err.Error()))
 		}
 		initializeLeafNode(rooPage)
+		setNodeRoot(rooPage, true)
 	}
 
 	return &Table{
@@ -214,7 +224,7 @@ func dbOpen(fileName string) *Table {
 	}
 }
 
-func pagerFlush(pager *Pager, pageTh int) {
+func pagerFlush(pager *Pager, pageTh uint32) {
 	if pager.Pages[pageTh] == nil {
 		fmt.Println("Tried to flush null page")
 		os.Exit(0)
@@ -237,7 +247,7 @@ func pagerFlush(pager *Pager, pageTh int) {
 
 func dbClose(table *Table) {
 	pager := table.Pager
-	for i := 0; i <= pager.pagesCount; i++ {
+	for i := uint32(0); i <= pager.pagesCount; i++ {
 		if pager.Pages[i] == nil {
 			continue
 		}
@@ -248,18 +258,16 @@ func dbClose(table *Table) {
 
 // 创建一个位于table开始位置的光标
 func tableStart(table *Table) *Cursor {
-	cursor := &Cursor{
-		Table:  table,
-		PageTh: table.rootPageCTh,
-		CellTh: 0,
-	}
+	cursor := tableFind(table, 0) // 先找到一个最小的叶子节点
 
-	rootPage, err := getPage(table.Pager, table.rootPageCTh)
+	node, err := getPage(table.Pager, cursor.PageTh)
 	if err != nil {
-		fmt.Println("tableStart.getPage failed, err = ", err)
-		os.Exit(1)
+		PrintError("tableStart.get 0 Page failed")
+		return nil
 	}
-	cursor.EndOfTable = leafNodeGetCellsCount(rootPage) == 0
+	cellCount := node.LeafNodeGetCellsCount()
+	cursor.EndOfTable = cellCount == 0
+
 	return cursor
 }
 
@@ -273,27 +281,26 @@ func tableFind(table *Table, key uint32) *Cursor {
 	if nodeType == NODE_LEAF { // 如果是叶子节点对应的page，那么找一个特定的cell
 		return leafNodeFind(table, table.rootPageCTh, key)
 	}
-	PrintError("Need to implement searching an internal node")
-	return nil
+	return InternalNodeFind(table, table.rootPageCTh, key)
 }
 
-func leafNodeFind(table *Table, pageTh int, key uint32) *Cursor {
+func leafNodeFind(table *Table, pageTh uint32, key uint32) *Cursor {
 	node, err := getPage(table.Pager, pageTh)
 	if err != nil {
 		os.Exit(0)
 	}
-	cellCount := int(leafNodeGetCellsCount(node))
+	cellCount := node.LeafNodeGetCellsCount()
 
 	cursor := &Cursor{}
 	cursor.Table = table
-	cursor.PageTh = pageTh
+	cursor.PageTh = uint32(pageTh)
 
 	// 二分
-	lIndex := 0
+	lIndex := uint32(0)
 	rIndex := cellCount
 	for lIndex < rIndex {
 		mid := (lIndex + rIndex) / 2
-		keyAtMid := leafNodeGetKey(node, mid)
+		keyAtMid := node.LeafNodeGetKey(mid)
 		if keyAtMid == key {
 			cursor.PageTh = mid
 			return cursor
@@ -307,4 +314,8 @@ func leafNodeFind(table *Table, pageTh int, key uint32) *Cursor {
 	}
 	cursor.CellTh = lIndex
 	return cursor
+}
+
+// 输出B+树详情
+func printTree() {
 }

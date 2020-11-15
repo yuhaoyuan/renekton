@@ -62,6 +62,9 @@ func main() {
 		case EXECUTE_TABLE_FULL:
 			fmt.Println("table full.")
 			break
+		case EXECUTE_DUPLICATE_KEY:
+			fmt.Println("duplicate key, plz change id")
+			break
 		}
 	}
 }

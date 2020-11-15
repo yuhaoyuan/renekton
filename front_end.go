@@ -70,7 +70,7 @@ func prepareStatement(inputBuffer *InputBuffer, statement *Statement) PrepareRes
 	if strings.Contains(inputBuffer.buffer, "insert") {
 		statement.SType = STATEMENT_INSERT
 		args := strings.Split(inputBuffer.buffer, " ")
-		if len(args) < 4 {
+		if len(args) !=  4 {
 			return PREPARE_SYNTAX_ERROR
 		}
 		defer func() {
