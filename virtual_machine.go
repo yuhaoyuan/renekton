@@ -46,7 +46,6 @@ func getPage(pager *Pager, pageIndex uint32) (*Page, error) {
 			}
 		}
 		pager.Pages[pageIndex] = &Page{
-			// 因为golang uint8=0 也会读，所以读完了之后，手动处理一下理论长度
 			uint32(len(tempPage)),
 			&tempPage,
 		}
@@ -214,7 +213,7 @@ func dbOpen(fileName string) *Table {
 		if err != nil {
 			PrintError(fmt.Sprintf("dbOpen failed, err = %s", err.Error()))
 		}
-		initializeLeafNode(rooPage)
+		rooPage.initializeLeafNode()
 		setNodeRoot(rooPage, true)
 	}
 

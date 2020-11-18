@@ -41,7 +41,6 @@ func (c *Cursor) advance() {
 
 type Page struct {
 	pageLength uint32 // 维护当前切片最大长度
-	//nextLeafNodeTh uint32  // 叶子节点组成链表
 	data *[]byte // 包括meta信息+cells信息
 }
 

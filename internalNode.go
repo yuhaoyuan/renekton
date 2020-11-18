@@ -127,6 +127,7 @@ func (p *Page) internalNodeFindChild(key uint32) uint32 {
 		l = p.InternalNodeGetRightChild()
 	}
 
+
 	return l
 }
 
@@ -137,7 +138,8 @@ func InternalNodeFind(table *Table, pageTh uint32, key uint32) *Cursor {
 	}
 
 	// 内部节点的子节点可能仍然是内部节点
-	childTh := node.internalNodeFindChild(key)
+	childIndex := node.internalNodeFindChild(key)
+	childTh :=  node.InternalNodeGetChild(childIndex)
 	child, err := getPage(table.Pager, childTh)
 	if err != nil {
 		PrintError("internalNodeFind get child page failed")
