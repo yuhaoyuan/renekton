@@ -39,14 +39,14 @@ func getPage(pager *Pager, pageIndex uint32) (*Page, error) {
 				fmt.Println("fileDescriptor seek failed, err = ", err)
 				os.Exit(0)
 			}
-			_, err = pager.fileDescriptor.ReadAt(tempPage, int64(pageIndex*PAGE_SIZE)) // 最多读tempPage的长度
+			offset := pageIndex * PAGE_SIZE
+			_, err = pager.fileDescriptor.ReadAt(tempPage, int64(offset)) // 最多读tempPage的长度
 			if err != nil && err != io.EOF {
 				fmt.Println("fileDescriptor read failed, err = ", err)
 				os.Exit(0)
 			}
 		}
 		pager.Pages[pageIndex] = &Page{
-			uint32(len(tempPage)),
 			&tempPage,
 		}
 		if pageIndex >= pager.pagesCount {
@@ -151,7 +151,7 @@ func serializeRow(source *Row, page *Page, cellTh uint32) {
 
 	copy((*page.data)[offset+USERNAME_OFFSET:], userNameByte)
 	copy((*page.data)[offset+EMAIL_OFFSET:], emailByte)
-	page.pageLength = offset + ROW_SIZE
+	//page.pageLength = offset + ROW_SIZE
 }
 
 // 反序列化，将字符串变成数据
@@ -201,6 +201,7 @@ func pagerOpen(fileName string) *Pager {
 	pager := &Pager{
 		fileDescriptor: file,
 		fileLength:     uint32(fileLength),
+		pagesCount:     uint32(fileLength) / PAGE_SIZE,
 	}
 
 	return pager
@@ -212,6 +213,7 @@ func dbOpen(fileName string) *Table {
 		rooPage, err := getPage(pager, 0)
 		if err != nil {
 			PrintError(fmt.Sprintf("dbOpen failed, err = %s", err.Error()))
+			os.Exit(0)
 		}
 		rooPage.initializeLeafNode()
 		setNodeRoot(rooPage, true)
@@ -229,19 +231,21 @@ func pagerFlush(pager *Pager, pageTh uint32) {
 		os.Exit(0)
 	}
 
-	_, err := pager.fileDescriptor.Seek(int64(pageTh*PAGE_SIZE), io.SeekCurrent)
+	_, err := pager.fileDescriptor.Seek(0, io.SeekCurrent)
 	if err != nil {
 		fmt.Println("pager fileDescriptor Seek failed, err = ", err)
 		os.Exit(0)
 	}
 
 	// 截断
-	data := (*pager.Pages[pageTh].data)[:pager.Pages[pageTh].pageLength]
+	data := (*pager.Pages[pageTh].data)[:PAGE_SIZE]
 	_, err = pager.fileDescriptor.Write(data)
 	if err != nil {
 		fmt.Println("pager fileDescriptor Write failed, err = ", err)
 		os.Exit(0)
 	}
+	fileLength, err := pager.fileDescriptor.Seek(0, io.SeekEnd)
+	fmt.Println("len = ", fileLength)
 }
 
 func dbClose(table *Table) {

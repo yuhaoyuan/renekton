@@ -26,7 +26,7 @@ func main() {
 		err := readInput(inputBuffer)
 		if err != nil {
 			fmt.Println("readInput failed, err = ", err)
-			os.Exit(0)
+			continue
 		}
 		if inputBuffer.buffer[0] == '.' {
 			switch doMetaCommand(inputBuffer, table) {

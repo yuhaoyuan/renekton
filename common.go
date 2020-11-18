@@ -115,7 +115,7 @@ func leafNodeInsert(cursor *Cursor, keyByte []byte, value *Row) {
 func initializeInternalNode(node *Page) {
 	tempData := make([]byte, PAGE_SIZE)
 	*node.data = tempData
-	node.pageLength = PAGE_SIZE
+	//node.pageLength = PAGE_SIZE
 
 	setNodeRoot(node, false)
 	setNodeType(node, NODE_INTERNAL)
@@ -160,10 +160,14 @@ func leafNodeSplitAndInsert(cursor *Cursor, keyByte []byte, value *Row) {
 			// 新插入的cell应该写入第i个cell处
 			serializeRow(value, desNode, desCellTh)
 			desNode.LeafNodeSetKey(desCellTh, keyByte)
+			desNode.LeafNodeAddCellsCount()
 		} else if i > cursor.CellTh {
 			// 在新节点index后面的节点需要往后移动一个cell距离, 即 原来的第cellTh是现在的第cellTh+1
 			tempCell := oldNode.LeafNodeGetCell(i - 1)
 			desNode.LeafNodeSetCell(desCellTh, tempCell)
+			// 新节点count + 1
+			desNode.LeafNodeAddCellsCount()
+			oldNode.LeafNodeSubCellsCount()
 		} else {
 			//新节点前面的节点正常移动
 			tempCell := oldNode.LeafNodeGetCell(i)
@@ -251,6 +255,8 @@ func createNewRoot(table *Table, rightChildPageTh uint32) {
 	leftChildMaxKey := leftChildNode.GetNodeMaxKey()
 	root.InternalNodeSetKey(0, leftChildMaxKey)
 	root.InternalNodeSetRightChild(rightChildPageTh)
+
+	leftChildNode.LeafNodeSetNextLeaf(rightChildPageTh)
 }
 
 //func printTree(){
@@ -304,13 +310,13 @@ func internalNodeInsert(table *Table, parentPageTh, childPageTh uint32) {
 
 	} else {
 		// 需要创建一个新的cell(key+ptr)
-		for  i := originalKeyCount; i> index;i--{
+		for i := originalKeyCount; i > index; i-- {
 			// 向右平移
 			destination := parentNode.InternalNodeGetCell(i)
-			source := parentNode.InternalNodeGetCell(i-1)
+			source := parentNode.InternalNodeGetCell(i - 1)
 			parentNode.InternalNodeMove(destination, source)
 			// 防止uint32溢出
-			if i==0{
+			if i == 0 {
 				break
 			}
 		}

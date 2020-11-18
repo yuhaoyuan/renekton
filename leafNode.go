@@ -76,6 +76,23 @@ func (p *Page) LeafNodeAddCellsCount() {
 	copy((*p.data)[offset:offset+LEAF_NODE_VALUE_SIZE], newCellCountStr[:])
 }
 
+func (p *Page) LeafNodeSubCellsCount() {
+	cellCount := p.LeafNodeGetCellsCount()
+
+	if cellCount - 1 == LEAF_NODE_MAX_CELLS {
+		fmt.Println("can not leafNodeGetCellsCount, because cell full")
+		os.Exit(0)
+	}
+	if cellCount == 0 {
+		return
+	}
+	cellCount -= 1
+	newCellCountStr := NumberToByte(cellCount)
+
+	offset := LEAF_NODE_CELLS_COUNT_OFFSET
+	copy((*p.data)[offset:offset+LEAF_NODE_VALUE_SIZE], newCellCountStr[:])
+}
+
 // 返回指定page(节点)中的指定cell值 （key + value）
 func (p *Page) LeafNodeGetCell(cellTh uint32) []byte {
 	offset := LEAF_NODE_HEADER_SIZE + cellTh*LEAF_NODE_CELL_SIZE
@@ -125,7 +142,7 @@ func (p *Page) LeafNodeSetNextLeaf(pageTh uint32) uint32 {
 	offset := LEAF_NODE_NEXT_LEAF_OFFSET
 
 	pageThByte := NumberToByte(pageTh)
-	copy((*p.data)[offset : offset+LEAF_NODE_NEXT_LEAF_SIZE], pageThByte[:])
+	copy((*p.data)[offset:offset+LEAF_NODE_NEXT_LEAF_SIZE], pageThByte[:])
 	return pageTh
 }
 
