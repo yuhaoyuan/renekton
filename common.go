@@ -108,6 +108,7 @@ func leafNodeInsert(cursor *Cursor, keyByte []byte, value *Row) {
 	page.LeafNodeAddCellsCount()
 	page.LeafNodeSetKey(cursor.CellTh, keyByte)
 
+	// 是否需要更新父节点
 	serializeRow(value, page, cursor.CellTh)
 }
 

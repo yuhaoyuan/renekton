@@ -127,7 +127,6 @@ func (p *Page) internalNodeFindChild(key uint32) uint32 {
 		l = p.InternalNodeGetRightChild()
 	}
 
-
 	return l
 }
 
